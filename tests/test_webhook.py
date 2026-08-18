@@ -25,11 +25,10 @@ def test_build_payload_deck_progress_and_allowlist(webhook_mod, deck_tree):
     mw.addonManager.getConfig.return_value = {
         "identifier": "learner@example.com",
         "include_subdecks": True,
-        "decks": ["Japanese"],
     }
 
     wh = webhook_mod.SyncWebhook(module="anki_webhook")
-    payload = wh.build_payload()
+    payload = wh.build_payload(decks_allowlist=["Japanese"])
 
     assert payload["schema_version"] == 1
     assert payload["identifier"] == "learner@example.com"
@@ -51,7 +50,7 @@ def test_build_payload_deck_progress_and_allowlist(webhook_mod, deck_tree):
 
 def test_deliver_posts_json_with_requests(webhook_mod):
     """Test plan:
-    1. Config enabled + endpoint_url + Authorization header.
+    1. Config enabled + legacy endpoint_url + Authorization header.
     2. Mock requests.request to return ok=True / 200.
     3. deliver({...}) → one POST with json=payload and Authorization header set.
     """
@@ -80,6 +79,55 @@ def test_deliver_posts_json_with_requests(webhook_mod):
     assert args[1] == "http://example.test/anki"
     assert kwargs["json"] == payload
     assert kwargs["headers"]["Authorization"] == "Bearer secret"
+
+
+def test_endpoints_list_with_per_endpoint_decks(webhook_mod, deck_tree):
+    """Test plan:
+    1. Config endpoints[] with two URLs and different decks allowlists.
+    2. endpoints() resolves both; send worker posts filtered payloads.
+    3. First URL gets only Japanese*; second gets only Spanish.
+    """
+    mw = webhook_mod.mw
+    mw.col = MagicMock()
+    mw.col.sched.deck_due_tree.return_value = deck_tree
+    mw.col.db.all.return_value = [
+        (2, 100, 0, 40, 10, 30, 20),
+        (3, 50, 0, 50, 0, 0, 0),
+    ]
+    mw.addonManager.getConfig.return_value = {
+        "enabled": True,
+        "identifier": "learner@example.com",
+        "include_subdecks": True,
+        "notify_on_success": False,
+        "notify_on_error": False,
+        "endpoints": [
+            {"url": "http://a.test/anki", "decks": ["Japanese"]},
+            {"url": "http://b.test/anki", "decks": ["Spanish"]},
+        ],
+    }
+    wh = webhook_mod.SyncWebhook(module="anki_webhook")
+    eps = wh.endpoints()
+    assert [e["url"] for e in eps] == ["http://a.test/anki", "http://b.test/anki"]
+
+    fake = MagicMock()
+    fake.ok = True
+    fake.status_code = 200
+    with patch.object(webhook_mod.requests, "request", return_value=fake) as req:
+        all_decks = wh.collect_deck_progress()
+        for ep in eps:
+            allowlist = wh.normalize_allowlist(ep.get("decks"))
+            payload = {
+                "schema_version": 1,
+                "identifier": "learner@example.com",
+                "decks": wh.filter_decks(all_decks, allowlist),
+            }
+            wh.deliver_one(payload, ep, manual=False)
+
+    assert req.call_count == 2
+    first_decks = req.call_args_list[0].kwargs["json"]["decks"]
+    second_decks = req.call_args_list[1].kwargs["json"]["decks"]
+    assert [d["name"] for d in first_decks] == ["Japanese", "Japanese::Kanji"]
+    assert [d["name"] for d in second_decks] == ["Spanish"]
 
 
 def test_deliver_skips_when_disabled(webhook_mod):

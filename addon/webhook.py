@@ -24,7 +24,30 @@ class SyncWebhook:
     def cfg(self) -> dict[str, Any]:
         return mw.addonManager.getConfig(self.module) or {}
 
-    def build_payload(self) -> dict[str, Any]:
+    @staticmethod
+    def normalize_allowlist(raw: Any) -> list[str] | None:
+        """None = all decks; non-empty list = allowlist (parent matches children)."""
+        if raw is None:
+            return None
+        if not isinstance(raw, list):
+            raise ValueError("'decks' must be a list of deck name strings")
+        names = [str(x).strip() for x in raw if str(x).strip()]
+        return names or None
+
+    @staticmethod
+    def filter_decks(
+        decks: list[dict[str, Any]], allowlist: list[str] | None
+    ) -> list[dict[str, Any]]:
+        if allowlist is None:
+            return decks
+        return [
+            d
+            for d in decks
+            if any(d["name"] == name or d["name"].startswith(name + "::") for name in allowlist)
+        ]
+
+    def collect_deck_progress(self) -> list[dict[str, Any]]:
+        """All deck progress rows (optionally top-level only via include_subdecks)."""
         col = mw.col
         if col is None:
             raise RuntimeError("Collection is not open")
@@ -32,7 +55,6 @@ class SyncWebhook:
         cfg = self.cfg()
         include_subdecks = bool(cfg.get("include_subdecks", True))
 
-        # Walk full tree for ids/names; include_subdecks only controls what we emit.
         entries: list[dict[str, Any]] = []
         children_of: dict[int, list[int]] = {}
 
@@ -54,25 +76,10 @@ class SyncWebhook:
             return did
 
         walk(col.sched.deck_due_tree(), 0, "")
-
-        # Optional allowlist: empty [] = all; "Japanese" also matches "Japanese::Kanji".
-        raw = cfg.get("decks")
-        allowlist: list[str] | None = None
-        if isinstance(raw, list):
-            allowlist = [str(x).strip() for x in raw if str(x).strip()] or None
-        elif raw is not None:
-            raise ValueError("config key 'decks' must be a list of deck name strings")
-        if allowlist is not None:
-            entries = [
-                d
-                for d in entries
-                if any(d["name"] == name or d["name"].startswith(name + "::") for name in allowlist)
-            ]
-        elif not include_subdecks:
+        if not include_subdecks:
             entries = [d for d in entries if int(d["depth"]) == 1]
 
         # Per-deck card progress (Anki stats: new / learning / young / mature).
-        # young = review ivl < 21d, mature = review ivl >= 21d; suspended counted apart.
         by_did: dict[int, dict[str, int]] = {}
         for row in col.db.all(
             """
@@ -124,7 +131,13 @@ class SyncWebhook:
                     "seen_pct": round(100.0 * seen / cards, 1) if cards else 0.0,
                 }
             )
+        return decks
 
+    def build_payload(self, *, decks_allowlist: Any = None) -> dict[str, Any]:
+        """Build progress JSON. decks_allowlist is endpoint-scoped (None = all decks)."""
+        cfg = self.cfg()
+        allowlist = self.normalize_allowlist(decks_allowlist)
+        decks = self.filter_decks(self.collect_deck_progress(), allowlist)
         return {
             "schema_version": 1,
             "source": "anki-sync-webhook",
@@ -134,26 +147,67 @@ class SyncWebhook:
             "decks": decks,
         }
 
-    def deliver(self, payload: dict[str, Any], *, manual: bool = False) -> None:
+    def endpoints(self) -> list[dict[str, Any]]:
+        """Resolved delivery targets. `endpoints` wins; else legacy `endpoint_url`."""
         cfg = self.cfg()
-        if not cfg.get("enabled", True):
-            print(f"[{self.name}] disabled; skipping")
-            return
+        global_headers = cfg.get("headers") if isinstance(cfg.get("headers"), dict) else {}
+        global_method = str(cfg.get("method") or "POST").upper()
+        global_timeout = float(cfg.get("timeout_seconds") or 10)
 
-        url = (cfg.get("endpoint_url") or "").strip()
+        raw = cfg.get("endpoints")
+        if isinstance(raw, list) and raw:
+            out: list[dict[str, Any]] = []
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                url = str(item.get("url") or "").strip()
+                if not url:
+                    continue
+                method = str(item.get("method") or global_method).upper()
+                if method not in {"POST", "PUT"}:
+                    method = "POST"
+                if isinstance(item.get("headers"), dict):
+                    headers = item["headers"]
+                else:
+                    headers = global_headers
+                timeout = float(item.get("timeout_seconds") or global_timeout)
+                out.append(
+                    {
+                        "url": url,
+                        "method": method,
+                        "headers": headers,
+                        "decks": item.get("decks"),
+                        "timeout_seconds": timeout,
+                    }
+                )
+            return out
+
+        url = str(cfg.get("endpoint_url") or "").strip()
         if not url:
-            msg = "endpoint_url is empty — set it in Tools → Add-ons → Config"
-            print(f"[{self.name}] {msg}")
-            if manual or cfg.get("notify_on_error", True):
-                tooltip(f"{self.name}: {msg}")
-            return
+            return []
+        method = global_method if global_method in {"POST", "PUT"} else "POST"
+        return [
+            {
+                "url": url,
+                "method": method,
+                "headers": global_headers,
+                "decks": None,
+                "timeout_seconds": global_timeout,
+            }
+        ]
 
-        method = str(cfg.get("method") or "POST").upper()
-        if method not in {"POST", "PUT"}:
-            method = "POST"
-
+    def deliver_one(
+        self,
+        payload: dict[str, Any],
+        endpoint: dict[str, Any],
+        *,
+        manual: bool = False,
+    ) -> None:
+        cfg = self.cfg()
+        url = endpoint["url"]
+        method = endpoint["method"]
         headers = {"User-Agent": "anki-sync-webhook/0.1"}
-        for key, value in (cfg.get("headers") or {}).items():
+        for key, value in (endpoint.get("headers") or {}).items():
             text = str(value or "").strip()
             if text:
                 headers[str(key)] = text
@@ -165,7 +219,7 @@ class SyncWebhook:
                 url,
                 json=payload,
                 headers=headers,
-                timeout=float(cfg.get("timeout_seconds") or 10),
+                timeout=float(endpoint.get("timeout_seconds") or 10),
             )
             ms = int((time.monotonic() - started) * 1000)
             print(f"[{self.name}] {method} {url} -> {resp.status_code} in {ms}ms")
@@ -179,23 +233,60 @@ class SyncWebhook:
             if manual or cfg.get("notify_on_error", True):
                 tooltip(f"{self.name}: {exc}")
 
-    def _send(self, *, manual: bool) -> None:
+    def deliver(self, payload: dict[str, Any], *, manual: bool = False) -> None:
+        """Back-compat: send one payload to every configured endpoint (same decks)."""
+        cfg = self.cfg()
+        if not cfg.get("enabled", True):
+            print(f"[{self.name}] disabled; skipping")
+            return
+        targets = self.endpoints()
+        if not targets:
+            msg = "no endpoints — set endpoints[] or endpoint_url in Config"
+            print(f"[{self.name}] {msg}")
+            if manual or cfg.get("notify_on_error", True):
+                tooltip(f"{self.name}: {msg}")
+            return
+        for ep in targets:
+            self.deliver_one(payload, ep, manual=manual)
+
+    def _send(self, *, manual: bool = False) -> None:
+        cfg = self.cfg()
+        if not cfg.get("enabled", True):
+            print(f"[{self.name}] disabled; skipping")
+            return
+
+        targets = self.endpoints()
+        if not targets:
+            msg = "no endpoints — set endpoints[] or endpoint_url in Config"
+            print(f"[{self.name}] {msg}")
+            if manual or cfg.get("notify_on_error", True):
+                tooltip(f"{self.name}: {msg}")
+            return
+
         try:
-            payload = self.build_payload()
+            all_decks = self.collect_deck_progress()
         except Exception as exc:  # noqa: BLE001
             print(f"[{self.name}] build failed: {exc}\n{traceback.format_exc()}")
             if manual:
                 showInfo(f"{self.name}\n\nFailed to build payload:\n{exc}")
-            elif self.cfg().get("notify_on_error", True):
+            elif cfg.get("notify_on_error", True):
                 tooltip(f"{self.name}: build failed: {exc}")
             return
-        threading.Thread(
-            target=self.deliver,
-            args=(payload,),
-            kwargs={"manual": manual},
-            daemon=True,
-            name="anki-sync-webhook",
-        ).start()
+
+        def worker() -> None:
+            for ep in targets:
+                allowlist = self.normalize_allowlist(ep.get("decks"))
+                payload = {
+                    "schema_version": 1,
+                    "source": "anki-sync-webhook",
+                    "event": "sync_did_finish",
+                    "sent_at": datetime.now(UTC).isoformat(),
+                    "identifier": str(cfg.get("identifier") or "").strip(),
+                    "decks": self.filter_decks(all_decks, allowlist),
+                }
+                self.deliver_one(payload, ep, manual=manual)
+
+        threading.Thread(target=worker, daemon=True, name="anki-sync-webhook").start()
         if manual:
             tooltip(f"{self.name}: sending…")
 

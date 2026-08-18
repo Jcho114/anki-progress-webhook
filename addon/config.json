@@ -1,14 +1,18 @@
 {
   "enabled": true,
-  "endpoint_url": "http://127.0.0.1:8787/anki",
+  "identifier": "joseph.cho20@gmail.com",
+  "include_subdecks": true,
   "method": "POST",
+  "timeout_seconds": 10,
   "headers": {
     "Authorization": ""
   },
-  "timeout_seconds": 10,
-  "identifier": "joseph.cho20@gmail.com",
-  "decks": ["Kaishi 1.5k"],
-  "include_subdecks": true,
+  "endpoints": [
+    {
+      "url": "http://127.0.0.1:8787/anki",
+      "decks": ["Kaishi 1.5k"]
+    }
+  ],
   "notify_on_success": false,
   "notify_on_error": true
 }

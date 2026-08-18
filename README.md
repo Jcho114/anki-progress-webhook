@@ -1,16 +1,21 @@
 # Anki Sync Webhook (PoC)
 
-Anki add-on that fires after **collection sync** and POSTs deck progress JSON to any URL you configure.
+Anki add-on that fires after **collection sync** and POSTs **deck progress** JSON to one or more endpoints (optional shared leaderboard server included).
+
+## Scope
+
+**In scope:** `sync_did_finish` → deck progress payload → HTTP POST/PUT (per-endpoint deck filters).  
+**Out of scope (for now):** other Anki triggers, non-progress payloads, generic plugin/ops framework.
 
 ## Idea
 
-Hook `gui_hooks.sync_did_finish` → snapshot deck progress → POST to a tracker that stores per-person stats in SQLite and renders a shared board.
+Hook `gui_hooks.sync_did_finish` → snapshot deck progress → POST to configured endpoints. The sample tracker stores per-person stats in SQLite and renders a shared board.
 
 Also exposes **Tools → Anki Sync Webhook → Send progress now** so you can test without syncing.
 
 ## User journey
 
-1. **Setup (once)** — Install the add-on, set `endpoint_url` + `identifier`, start the tracker. Restart Anki if needed.
+1. **Setup (once)** — Install the add-on, set `identifier` + `endpoints`, start the tracker. Restart Anki if needed.
 2. **Everyday** — Study as usual, then Sync. Progress is upserted for your identifier + deck(s).
 3. **If something’s wrong** — Failures toast by default. Use **Preview payload…** / **Send progress now**.
 4. **On the board** — Open the tracker homepage to see a multiplayer leaderboard by `seen_pct`.
@@ -94,14 +99,17 @@ Tools → Add-ons → **Anki Sync Webhook** → Config:
 ```json
 {
   "enabled": true,
-  "endpoint_url": "http://127.0.0.1:8787/anki",
   "identifier": "you@example.com",
-  "decks": ["Japanese", "Medical::Anatomy"],
-  "headers": { "Authorization": "Bearer optional-secret" }
+  "endpoints": [
+    {
+      "url": "http://127.0.0.1:8787/anki",
+      "decks": ["Kaishi 1.5k"]
+    }
+  ]
 }
 ```
 
-`decks` is an allowlist (empty `[]` = all). A listed name also includes its children (e.g. `Japanese` matches `Japanese::Kanji`).
+`decks` is endpoint-scoped (omit or `[]` = all decks for that URL). Legacy `endpoint_url` still works and sends all decks.
 
 The add-on POSTs with **requests**, vendored under `addon/vendor/` so Anki does not need a separate pip install. Refresh with:
 
@@ -140,5 +148,5 @@ uv run pytest
 ## Notes / next steps
 
 - Delivery is fire-and-forget; failures only toast (configurable).
-- Media sync may still be running when `sync_did_finish` fires — this intentionally reports **collection** progress.
-- Natural follow-ups: auth on the webhook, progress history/sparklines, hosted deploy, Discord bot.
+- Media sync may still be running when `sync_did_finish` fires — this still reports deck progress from the local collection.
+- Natural follow-ups within this scope: webhook auth, progress history/sparklines, hosted deploy.
