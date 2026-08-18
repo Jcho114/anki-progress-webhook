@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.ankiaddon
+.DS_Store
+.venv/
+server/data/
+*.db
+.pytest_cache/
+addon/vendor/bin/
+

@@ -1,0 +1,7 @@
+{
+  "package": "anki_webhook",
+  "name": "Anki Sync Webhook",
+  "mod": 1755480000,
+  "min_point_version": 50,
+  "human_version": "0.1.0"
+}

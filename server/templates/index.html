@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{% if selected %}{{ selected }} · {% endif %}Anki Progress</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+  <header class="top">
+    <div>
+      <p class="brand">Anki Progress</p>
+      <h1>{% if selected %}{{ selected }}{% else %}No decks yet{% endif %}</h1>
+      <p class="sub">Shared deck progress from sync webhooks</p>
+    </div>
+    <p class="webhook">POST → <code>{{ webhook_url }}</code></p>
+  </header>
+
+  {% if decks %}
+  <nav class="decks" aria-label="Decks">
+    {% for deck in decks %}
+      <a class="deck-link{% if deck == selected %} is-active{% endif %}"
+         href="{{ url_for('index', deck=deck) }}">{{ deck }}</a>
+    {% endfor %}
+  </nav>
+  {% endif %}
+
+  <main>
+    {% if not rows %}
+      <p class="empty">No progress yet. Sync or use <strong>Send progress now</strong> in Anki.</p>
+    {% else %}
+      <ol class="board">
+        {% for row in rows %}
+        <li class="row">
+          <div class="who">
+            <span class="rank">{{ loop.index }}</span>
+            <div>
+              <p class="id">{{ row.identifier }}</p>
+              <p class="meta">updated {{ row.updated_at }}</p>
+            </div>
+          </div>
+          <div class="bar-wrap" title="{{ '%.1f'|format(row.seen_pct) }}% seen">
+            <div class="bar" style="width: {% if row.seen_pct > 100 %}100{% else %}{{ row.seen_pct }}{% endif %}%"></div>
+          </div>
+          <div class="stats">
+            <span><strong>{{ '%.1f'|format(row.seen_pct) }}%</strong> seen</span>
+            <span>{{ row.mature }} mature</span>
+            <span>{{ row.young }} young</span>
+            <span>{{ row.learning }} learning</span>
+            <span>{{ row.new }} new</span>
+            <span>{{ row.cards }} cards</span>
+          </div>
+        </li>
+        {% endfor %}
+      </ol>
+    {% endif %}
+  </main>
+</body>
+</html>
